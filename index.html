@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Slot Engine</title>
+<style>
+body {
+    font-family: monospace;
+    background:#000;
+    color:#0f0;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    height:100vh;
+    margin:0;
+}
+
+#game {
+    width:720px;
+    height:720px;
+    border:2px solid #0f0;
+    display:flex;
+    flex-direction:column;
+    padding:8px;
+    box-sizing:border-box;
+}
+
+/* terminal sections */
+.panel {
+    border:1px solid #0f0;
+    padding:6px;
+    margin-bottom:6px;
+}
+
+/* header */
+#topbar {
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    text-align:center;
+}
+
+/* main grid */
+#main {
+    display:grid;
+    grid-template-columns:2fr 1fr;
+    grid-template-rows:auto 1fr;
+    gap:6px;
+    flex:1;
+}
+
+/* reels + bets */
+#playArea {
+    grid-column:1;
+    grid-row:1 / span 2;
+    display:flex;
+    flex-direction:column;
+}
+
+#reels {
+    display:flex;
+}
+
+.reel {
+    flex:1;
+    height:80px;
+    border:1px solid #0f0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:32px;
+}
+
+#bets {
+    display:flex;
+}
+
+.bet {
+    flex:1;
+    border:1px solid #0f0;
+    text-align:center;
+    cursor:pointer;
+    padding:6px;
+}
+
+/* formula log */
+#formula {
+    grid-column:2;
+    grid-row:1;
+    height:200px;
+    overflow:hidden;
+    font-size:11px;
+    display:flex;
+    flex-direction:column-reverse;
+}
+
+/* shop */
+#shop {
+    grid-column:2;
+    grid-row:2;
+    overflow-y:auto;
+}
+
+.shopItem {
+    border:1px solid #0f0;
+    padding:4px;
+    margin-bottom:4px;
+    cursor:grab;
+}
+
+/* controls */
+#controls {
+    display:flex;
+}
+
+button {
+    flex:1;
+    background:#000;
+    color:#0f0;
+    border:1px solid #0f0;
+}
+#gameover {
+    position:absolute;
+    top:50%;
+    left:50%;
+    transform:translate(-50%, -50%);
+    background:#000;
+    border:2px solid #0f0;
+    padding:20px;
+    display:none;
+    z-index:10;
+}
+</style>
+</head>
+<body>
+
+<div id="game">
+<div id="topbar" class="panel">
+    <div>Score: <span id="score">0</span></div>
+    <div>Quota: <span id="quota"></span></div>
+    <div>Time: <span id="timer">0</span></div>
+</div>
+
+<div id="main">
+
+    <div id="playArea" class="panel">
+        <div id="reels"></div>
+        <div id="bets"></div>
+        <div id="stats" class="panel"></div>
+        <div id="controls">
+            <button onclick="spin()">SPIN ($<span id="cost">0</span>)</button>
+        </div>
+    </div>
+
+    <div id="formula" class="panel"></div>
+
+    <div id="shop" class="panel"></div>
+
+</div>
+
+
+<div id="gameover"></div>
+</div>
+</div>
+
+<script>
+let gameActive = true;
+let score = 100;
+let quota = 300;
+let baseQuota = 300;
+let round = 1;
+let time = 60;
+let lastFormulas = ["","","",""];
+let spinCost = 5;
+let spinScaling = 1.25;
+
+let reels = [0,0,0,0];
+let bets = [0,0,0,0];
+
+let rollStats = Array(10).fill(0);
+let highestScore = 100;
+let totalScore = 0;
+
+let nodes = [
+    {add:0,mult:1,exp:1,profit:0},
+    {add:0,mult:1,exp:1,profit:0},
+    {add:0,mult:1,exp:1,profit:0},
+    {add:0,mult:1,exp:1,profit:0}
+];
+
+let dragItem = null;
+
+function safeNumber(x){
+    return Number.isFinite(x) && !Number.isNaN(x);
+}
+
+function init(){
+    let r = document.getElementById("reels");
+    let b = document.getElementById("bets");
+
+    for(let i=0;i<4;i++){
+
+        let reel = document.createElement("div");
+        reel.className="reel";
+        r.appendChild(reel);
+
+        let bet = document.createElement("div");
+        bet.className="bet";
+        bet.innerHTML = `
+            <div class="betNumber" id="betNum${i}">0</div>
+            <div class="buffHover" id="hover${i}"></div>
+        `;
+
+        bet.onwheel = (e)=>{
+            e.preventDefault();
+            bets[i] = (bets[i] + (e.deltaY>0?1:-1) + 10)%10;
+            updateUI();
+        };
+
+        bet.ondragover = e=>e.preventDefault();
+        bet.ondrop = ()=>handleDrop(i);
+
+        b.appendChild(bet);
+    }
+
+    document.getElementById("timer").ondragover = e=>e.preventDefault();
+    document.getElementById("timer").ondrop = ()=>handleDrop("time");
+
+    setInterval(tick,1000);
+    setInterval(generateShop,120000);
+
+    generateShop();
+    updateUI();
+}
+
+function spin(){
+    if(!gameActive) return;
+    lastFormulas = ["","","",""];
+    if(score < spinCost){
+        gameOver("No funds");
+        return;
+    }
+
+    score -= spinCost;
+    spinCost = Math.floor(spinCost * spinScaling * (1 + round*0.05));
+    time += 0;
+
+    let total = 0;
+
+    for(let i=0;i<4;i++){
+
+    let roll = Math.floor(Math.random()*10);
+    reels[i]=roll;
+    rollStats[roll]++;
+
+    let betMatch = (roll === bets[i]) ? bets[i] : 0;
+
+    let base = roll + betMatch;
+    let added = base + nodes[i].add;
+    let multiplied = added * nodes[i].mult;
+    let val = Math.pow(multiplied, nodes[i].exp);
+
+    // store readable formula
+    lastFormulas[i] =
+        `[(${roll}${betMatch ? "+"+betMatch : ""}) + ${nodes[i].add}] × ${nodes[i].mult.toFixed(2)} ^ ${nodes[i].exp.toFixed(3)} = ${Math.floor(val)}`;
+
+    if(!safeNumber(val)) gameOver("Overflow");
+
+    nodes[i].profit += val;
+    total += val;
+    }
+
+    if(!safeNumber(total) || !safeNumber(score)){
+        gameOver("Overflow");
+        return;
+    }
+
+    score += total;
+    totalScore += total;
+    highestScore = Math.max(highestScore, score);
+
+    quota -= total;
+
+    if(quota <= 0){
+    round++;
+    quota = Math.floor(baseQuota * Math.pow(1.35, round));
+    time += 40;
+
+    generateShop(); // force restock
+    }
+
+    if(!safeNumber(score) || score === Infinity){
+        gameOver("Infinity reached");
+        return;
+    }
+
+    updateUI();
+}
+
+function tick(){
+    if(!gameActive) return;
+    time--;
+    if(time <= 0) gameOver("Time");
+    updateUI();
+}
+
+function gameOver(reason){
+    if(!gameActive) return;
+    gameActive = false;
+    let mostRolled = rollStats.indexOf(Math.max(...rollStats));
+    let bestCol = nodes.indexOf(nodes.reduce((a,b)=>a.profit>b.profit?a:b));
+    let n = nodes[bestCol];
+
+    document.getElementById("gameover").style.display="flex";
+    document.getElementById("gameover").innerHTML = `
+    <div style="text-align:center">
+
+    <div>=== SESSION TERMINATED ===</div>
+    <div>CAUSE: ${reason}</div>
+
+    <br>
+
+    <div>ROUND: ${round}</div>
+    <div>PEAK SCORE: ${Math.floor(highestScore)}</div>
+    <div>TOTAL GAIN: ${Math.floor(totalScore)}</div>
+
+    <br>
+
+    <div>BEST COLUMN: ${bestCol}</div>
+    <div>[ +${n.add} | x${n.mult.toFixed(2)} | ^${n.exp.toFixed(2)} ]</div>
+
+    <br>
+
+    <div>MOST ROLLED: ${mostRolled}</div>
+
+    <br>
+
+    <button onclick="location.reload()">REBOOT</button>
+
+    </div>
+    `;
+}
+
+function generateShop(){
+    if(!gameActive) return;
+    let shop = document.getElementById("shop");
+    shop.innerHTML="";
+
+    for(let i=0;i<4;i++){
+
+        let roll = Math.random();
+
+        let type;
+        if(roll < 0.4) type="add";
+        else if(roll < 0.75) type="mult";
+        else if(roll < 0.9) type="time";
+        else type="exp"; // rare
+
+        let base = spinCost * (1 + round*0.2);
+        let cost = Math.floor(base * (0.8 + Math.random()*0.6));
+
+        let div = document.createElement("div");
+        div.className="shopItem";
+        div.draggable=true;
+
+        let data = {type,cost};
+
+        if(type==="time"){
+            data.val = Math.floor(10 + round*2 + Math.random()*10);
+            div.innerText = `+${data.val}s ($${cost})`;
+        }
+
+        if(type==="add"){
+            data.val = Math.floor(1 + Math.random()* (2 + round*0.3));
+            div.innerText = `add:${data.val} ($${cost})`;
+        }
+
+        if(type==="mult"){
+            data.val = 1.1 + Math.random()*0.5 + round*0.02;
+            data.cost *= 1.3;
+            div.innerText = `mult:${data.val.toFixed(2)} ($${Math.floor(data.cost)})`;
+        }
+
+        if(type==="exp"){
+            data.val = 1.02 + Math.random()*0.08;
+            data.cost *= 4 + round*0.5; // expensive
+            div.innerText = `exp:${data.val.toFixed(3)} ($${Math.floor(data.cost)})`;
+        }
+
+        data.cost = Math.floor(data.cost);
+
+        div.ondragstart = ()=>dragItem = data;
+
+        shop.appendChild(div);
+    }
+}
+
+function handleDrop(target){
+    if(!gameActive) return;
+    if(!dragItem) return;
+
+    let valid = false;
+
+    // validate target BEFORE spending
+    if(dragItem.type === "time" && target === "time"){
+        valid = true;
+    }
+
+    if(dragItem.type !== "time" && target !== "time"){
+        valid = true;
+    }
+
+    if(!valid){
+        dragItem = null;
+        return;
+    }
+
+    if(score < dragItem.cost){
+        dragItem = null;
+        return;
+    }
+
+    // apply cost AFTER validation
+    score -= dragItem.cost;
+
+    if(dragItem.type === "time"){
+        time += dragItem.val;
+    } else {
+        if(dragItem.type==="add") nodes[target].add += dragItem.val;
+        if(dragItem.type==="mult") nodes[target].mult *= dragItem.val;
+        if(dragItem.type==="exp") nodes[target].exp *= dragItem.val;
+    }
+
+    dragItem = null;
+    updateUI();
+}
+
+function updateUI(){
+
+    document.getElementById("score").innerText = Math.floor(score);
+    document.getElementById("quota").innerText = Math.floor(quota);
+    document.getElementById("timer").innerText = Math.floor(time);
+    document.getElementById("cost").innerText = spinCost;
+
+    let r = document.getElementById("reels").children;
+
+    for(let i=0;i<4;i++){
+        r[i].innerText = reels[i];
+
+        document.getElementById("betNum"+i).innerText = bets[i];
+
+        document.getElementById("hover"+i).innerText =
+            `+${nodes[i].add} x${nodes[i].mult.toFixed(2)} ^${nodes[i].exp.toFixed(3)}`;
+    }
+
+    let f = document.getElementById("formula");
+    f.innerHTML = ""; // hard reset every frame
+
+    if(lastFormulas.some(x => x !== "")){
+
+    let total = 0;
+
+    for(let i=0;i<4;i++){
+        if(lastFormulas[i]){
+            let div = document.createElement("div");
+            div.innerText = `C${i}: ${lastFormulas[i]}`;
+            f.appendChild(div);
+
+            // extract final value (after '=')
+            let val = Number(lastFormulas[i].split("=").pop());
+            if(Number.isFinite(val)) total += val;
+        }
+    }
+
+    let totalLine = document.createElement("div");
+    totalLine.innerText = "----------------";
+    f.appendChild(totalLine);
+
+    let sum = document.createElement("div");
+    sum.innerText = `TOTAL: ${Math.floor(total)}`;
+    f.appendChild(sum);
+
+    }else{
+    let div = document.createElement("div");
+    div.innerText = "{[(roll + betMatch) + add] × mult} ^ exp";
+    f.appendChild(div);
+    }
+    
+    let s = document.getElementById("stats");
+    s.innerHTML = "";
+
+    for(let i=0;i<4;i++){
+    let d = document.createElement("div");
+    d.innerText = `C${i} | +${nodes[i].add} | x${nodes[i].mult.toFixed(2)} | ^${nodes[i].exp.toFixed(2)} | Σ ${Math.floor(nodes[i].profit)}`;
+    s.appendChild(d);
+
+    
+}
+
+}
+
+init();
+
+</script>
+</body>
+</html>
